@@ -1,6 +1,6 @@
 import express, { Response } from 'express';
 import OpenAI from 'openai';
-import { cleanHistory, classifierPrompt, MOVIE_SYSTEM_PROMPT, OUT_OF_SCOPE_MESSAGE, parseScope } from './guardrail.js';
+import { cleanHistory, classifierPrompt, containsSensitiveOutput, isPromptExtractionAttempt, MOVIE_SYSTEM_PROMPT, OUT_OF_SCOPE_MESSAGE, parseScope } from './guardrail.js';
 
 type CompletionResult = {
   choices: Array<{ message?: { content?: string | null }; delta?: { content?: string | null } }>;
@@ -43,6 +43,7 @@ export function createApp(options: AppOptions = {}) {
   app.post('/api/chat', async (req, res) => {
     const { message, history } = requestData(req.body);
     if (!message) return res.status(400).json({ error: 'Hãy nhập câu hỏi trước khi gửi.' });
+    if (isPromptExtractionAttempt(message)) return res.json({ reply: OUT_OF_SCOPE_MESSAGE, blocked: true, usage: { input: 0, output: 0, total: 0 } });
 
     try {
       const classification = await client.chat.completions.create({
@@ -59,7 +60,9 @@ export function createApp(options: AppOptions = {}) {
         model, temperature: 0.55, max_tokens: 650,
         messages: [{ role: 'system', content: MOVIE_SYSTEM_PROMPT }, ...history, { role: 'user', content: message }],
       }) as CompletionResult;
-      return res.json({ reply: (answer.choices[0]?.message?.content ?? '').replaceAll('*', '').trim() || 'Mình chưa thể tạo câu trả lời lúc này.', blocked: false, usage: combineUsage(classifierUsage, usageFrom(answer.usage)) });
+      const reply = (answer.choices[0]?.message?.content ?? '').replaceAll('*', '').trim();
+      if (containsSensitiveOutput(reply)) return res.json({ reply: OUT_OF_SCOPE_MESSAGE, blocked: true, usage: combineUsage(classifierUsage, usageFrom(answer.usage)) });
+      return res.json({ reply: reply || 'Mình chưa thể tạo câu trả lời lúc này.', blocked: false, usage: combineUsage(classifierUsage, usageFrom(answer.usage)) });
     } catch (error) {
       console.error('Chat request failed:', error instanceof Error ? error.message : error);
       return res.status(502).json({ error: 'Không thể kết nối dịch vụ AI. Vui lòng thử lại sau.' });
@@ -79,6 +82,13 @@ export function createApp(options: AppOptions = {}) {
     });
     res.flushHeaders();
     res.write(': stream-open\n\n');
+
+    if (isPromptExtractionAttempt(message)) {
+      sendEvent(res, 'delta', { text: OUT_OF_SCOPE_MESSAGE });
+      sendEvent(res, 'usage', { input: 0, output: 0, total: 0 });
+      sendEvent(res, 'done', { blocked: true, latencyMs: Math.round(performance.now() - startedAt) });
+      return res.end();
+    }
 
     try {
       sendEvent(res, 'status', { stage: 'scope-check' });
@@ -101,15 +111,34 @@ export function createApp(options: AppOptions = {}) {
         messages: [{ role: 'system', content: MOVIE_SYSTEM_PROMPT }, ...history, { role: 'user', content: message }],
       }) as AsyncIterable<CompletionResult>;
       let answerUsage: TokenUsage = { input: 0, output: 0, total: 0 };
+      let pending = '';
+      let outputProbe = '';
+      let sensitiveOutput = false;
 
       for await (const chunk of stream) {
         const text = chunk.choices[0]?.delta?.content?.replaceAll('*', '') ?? '';
-        if (text) sendEvent(res, 'delta', { text });
+        if (text) {
+          pending += text;
+          outputProbe += text;
+          if (containsSensitiveOutput(outputProbe)) {
+            sensitiveOutput = true;
+            break;
+          }
+          if (pending.length > 48) {
+            sendEvent(res, 'delta', { text: pending.slice(0, -48) });
+            pending = pending.slice(-48);
+          }
+        }
         if (chunk.usage) answerUsage = usageFrom(chunk.usage);
       }
 
+      if (sensitiveOutput) {
+        sendEvent(res, 'delta', { text: OUT_OF_SCOPE_MESSAGE });
+      } else if (pending) {
+        sendEvent(res, 'delta', { text: pending });
+      }
       sendEvent(res, 'usage', combineUsage(classifierUsage, answerUsage));
-      sendEvent(res, 'done', { blocked: false, latencyMs: Math.round(performance.now() - startedAt) });
+      sendEvent(res, 'done', { blocked: sensitiveOutput, latencyMs: Math.round(performance.now() - startedAt) });
       return res.end();
     } catch (error) {
       console.error('Streaming chat request failed:', error instanceof Error ? error.message : error);
