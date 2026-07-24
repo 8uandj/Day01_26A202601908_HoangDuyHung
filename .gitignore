@@ -1,5 +1,9 @@
 # KHÔNG BAO GIỜ commit API key
 .env
+node_modules/
+dist/
+.tools/
+tsconfig.tsbuildinfo
 
 # Tài liệu nội bộ của giảng viên — không phát cho học viên
 docs/

@@ -169,3 +169,6 @@ solution/
 - [ ] `solution/exercises.md` — cả 9 câu đã trả lời
 - [ ] `solution/solution.py` — bản code cuối cùng
 - [ ] Đã zip và đổi tên đúng quy định trước khi upload LMS
+## VinUni CineBot (React + Node.js)
+
+Chạy lần đầu với Node.js LTS: `npm install`, sau đó dùng `npm run dev`. Mở địa chỉ Vite hiển thị trên terminal (mặc định `http://localhost:5173`). API Express chạy ở cổng `8787`; key chỉ được đọc từ `.env` tại server. Dùng `npm run build` để tạo production build và `npm test` để chạy kiểm thử.
